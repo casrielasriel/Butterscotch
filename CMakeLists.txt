@@ -183,6 +183,61 @@ else()
     add_executable(butterscotch ${SOURCES} ${PLATFORM_SOURCES} ${AUDIO_SOURCES})
 endif()
 
+# FFmpeg (video playback)
+option(ENABLE_FFMPEG "Enable FFmpeg-based video playback" ON)
+set(BUTTERSCOTCH_FFMPEG_STATIC_LIBS "")
+if(ENABLE_FFMPEG)
+    find_package(PkgConfig)
+    if(PKG_CONFIG_FOUND)
+        if(PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "switch")
+            # Console SDKs only ship static FFmpeg archives, and the private
+            # dependency closure (mpg123, lame, zlib, ...) is not exposed by a
+            # plain --libs query. Ask for the static closure and link it as a
+            # single, normalised list so each archive is passed exactly once.
+            execute_process(
+                COMMAND ${PKG_CONFIG_EXECUTABLE} --static --libs libavformat libavcodec libavutil libswscale libswresample
+                OUTPUT_VARIABLE _ffmpeg_static_libs
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE _ffmpeg_static_rc)
+            execute_process(
+                COMMAND ${PKG_CONFIG_EXECUTABLE} --static --cflags libavformat libavcodec libavutil libswscale libswresample
+                OUTPUT_VARIABLE _ffmpeg_static_cflags
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE _ffmpeg_static_cflags_rc)
+            if(_ffmpeg_static_rc EQUAL 0 AND NOT _ffmpeg_static_libs STREQUAL "")
+                add_compile_definitions(BUTTERSCOTCH_FFMPEG)
+                separate_arguments(_ffmpeg_static_libs UNIX_COMMAND "${_ffmpeg_static_libs}")
+                foreach(_lib IN LISTS _ffmpeg_static_libs)
+                    if(_lib MATCHES "^-l(.+)$")
+                        list(APPEND BUTTERSCOTCH_FFMPEG_STATIC_LIBS "${CMAKE_MATCH_1}")
+                    elseif(_lib STREQUAL "-pthread")
+                        list(APPEND BUTTERSCOTCH_FFMPEG_STATIC_LIBS pthread)
+                    else()
+                        list(APPEND BUTTERSCOTCH_FFMPEG_STATIC_LIBS "${_lib}")
+                    endif()
+                endforeach()
+                if(NOT _ffmpeg_static_cflags_rc EQUAL 0)
+                    set(_ffmpeg_static_cflags "")
+                endif()
+                separate_arguments(_ffmpeg_static_cflags UNIX_COMMAND "${_ffmpeg_static_cflags}")
+                target_compile_options(butterscotch PRIVATE ${_ffmpeg_static_cflags})
+            else()
+                message(WARNING "FFmpeg development libraries not found - video playback will be disabled")
+            endif()
+        else()
+            pkg_check_modules(FFMPEG IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+            if(FFMPEG_FOUND)
+                add_compile_definitions(BUTTERSCOTCH_FFMPEG)
+                target_link_libraries(butterscotch PRIVATE PkgConfig::FFMPEG)
+            else()
+                message(WARNING "FFmpeg development libraries not found - video playback will be disabled")
+            endif()
+        endif()
+    else()
+        message(WARNING "pkg-config not found - video playback will be disabled")
+    endif()
+endif()
+
 target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_include_directories(butterscotch PRIVATE src/${PLATFORM})
 
@@ -273,10 +328,6 @@ if(PLATFORM STREQUAL "cli" OR PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "swi
         set(VM_OPCODE_PROFILER_DEFAULT OFF)
         set(VM_STUB_LOGS_DEFAULT OFF)
     elseif(PLATFORM STREQUAL "switch")
-        if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-            add_compile_options(-ffast-math)
-        endif()
-
         add_compile_definitions(PLATFORM_SWITCH)
 
         set(VM_GML_PROFILER_DEFAULT OFF)
@@ -307,6 +358,11 @@ if(PLATFORM STREQUAL "cli" OR PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "swi
     target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl)
     target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl_common)
     target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/image)
+
+    file(GLOB DEBUG_FONT_SOURCES src/debug_font/*.c)
+    target_sources(butterscotch PRIVATE ${DEBUG_FONT_SOURCES})
+    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/debug_font)
+
     if (MSVC)
         target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/compat/getopt)
         add_compile_definitions(NO_STRTOK_R)
@@ -421,7 +477,7 @@ if(PLATFORM STREQUAL "cli" OR PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "swi
         set(BACKEND_LIBRARIES "")
     endif()
     if (PLATFORM STREQUAL "vita")
-        target_link_libraries(butterscotch PRIVATE
+        set(BUTTERSCOTCH_CONSOLE_LIBS
             ${BACKEND_LIBRARIES}
             ${AUDIO_LIBRARIES}
             ${PLATFORM_LIBRARIES}
@@ -431,18 +487,47 @@ if(PLATFORM STREQUAL "cli" OR PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "swi
             taihen_stub
             SceShaccCg_stub
         )
+    elseif (PLATFORM STREQUAL "switch")
+        set(BUTTERSCOTCH_CONSOLE_LIBS
+            ${BACKEND_LIBRARIES}
+            ${AUDIO_LIBRARIES}
+            ${PLATFORM_LIBRARIES}
+            GLESv2
+            stdc++
+        )
+    else()
+        set(BUTTERSCOTCH_CONSOLE_LIBS ${BACKEND_LIBRARIES} ${AUDIO_LIBRARIES} ${PLATFORM_LIBRARIES})
+    endif()
 
+    # Console SDKs link pre-built static archives (incl. FFmpeg's private
+    # closure) alongside the platform libraries. Deduplicate the combined list
+    # so each archive is passed once: without this, LTO + duplicated libpthread
+    # resolves the same archive member twice and fails with a multiple
+    # definition error.
+    list(APPEND BUTTERSCOTCH_CONSOLE_LIBS ${BUTTERSCOTCH_FFMPEG_STATIC_LIBS})
+    if (BUTTERSCOTCH_CONSOLE_LIBS)
+        list(REMOVE_DUPLICATES BUTTERSCOTCH_CONSOLE_LIBS)
+    endif()
+    target_link_libraries(butterscotch PRIVATE ${BUTTERSCOTCH_CONSOLE_LIBS})
+
+    # Duplicate system archives pulled in by both the platform and FFmpeg
+    # pkg-config closures are harmless but rejected by the LTO plugin.
+    if(CMAKE_INTERPROCEDURAL_OPTIMIZATION AND (PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "switch"))
+        target_link_options(butterscotch PRIVATE "-Wl,--allow-multiple-definition")
+    endif()
+
+    if (PLATFORM STREQUAL "vita")
         vita_create_self(eboot.bin butterscotch UNSAFE)
         vita_create_vpk(Butterscotch.vpk ${VITA_TITLEID} eboot.bin
             VERSION ${VITA_VERSION}
             NAME ${VITA_APP_NAME}
         )
-    else()
-        target_link_libraries(butterscotch PRIVATE ${BACKEND_LIBRARIES} ${AUDIO_LIBRARIES} ${PLATFORM_LIBRARIES})
-
-        if (PLATFORM STREQUAL "switch")
-            target_link_libraries(butterscotch PRIVATE GLESv2 stdc++)
-            nx_generate_nacp(OUTPUT Butterscotch.nacp NAME "Butterscotch" AUTHOR "Butterscotch" VERSION "1.0.0")
+    elseif (PLATFORM STREQUAL "switch")
+        nx_generate_nacp(OUTPUT Butterscotch.nacp NAME "Butterscotch" AUTHOR "Butterscotch" VERSION "1.0.0")
+        set(ROMFS_DIR "${CMAKE_CURRENT_BINARY_DIR}/romfs")
+        if (EXISTS "${ROMFS_DIR}" AND IS_DIRECTORY "${ROMFS_DIR}")
+            nx_create_nro(butterscotch NACP Butterscotch.nacp ROMFS "${ROMFS_DIR}")
+        else()
             nx_create_nro(butterscotch NACP Butterscotch.nacp)
         endif()
     endif()
@@ -474,7 +559,7 @@ elseif(PLATFORM STREQUAL "web")
     if (NOT ENABLE_MODERN_GL)
         message(FATAL_ERROR "Web requires modern gl!")
     endif()
-    file(GLOB GL_SOURCES src/gl/*.c src/gl_common/*.c src/image/*.c)
+    file(GLOB GL_SOURCES src/gl/*.c src/gl_common/*.c src/image/*.c src/debug_font/*.c)
     target_sources(butterscotch PRIVATE ${GL_SOURCES})
     target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl)
     target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl_common)
@@ -532,7 +617,7 @@ elseif(PLATFORM STREQUAL "android")
     if (NOT ENABLE_MODERN_GL)
         message(FATAL_ERROR "Android requires modern gl!")
     endif()
-    file(GLOB GL_SOURCES src/gl/*.c src/gl_common/*.c src/image/*.c)
+    file(GLOB GL_SOURCES src/gl/*.c src/gl_common/*.c src/image/*.c src/debug_font/*.c)
     target_sources(butterscotch PRIVATE ${GL_SOURCES})
     target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl)
     target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl_common)
