@@ -8680,9 +8680,47 @@ static RValue builtin_joystick_axes(VMContext* ctx, RValue* args, MAYBE_UNUSED i
     return RValue_makeReal(RunnerGamepad_getAxisCount(runner->gamepads, id));
 }
 
-// Window stubs
-STUB_RETURN_ZERO(window_get_fullscreen)
-STUB_RETURN_UNDEFINED(window_set_fullscreen)
+static RValue builtin_window_get_fullscreen(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    return RValue_makeBool(runner != nullptr && runner->getWindowFullscreen != nullptr && runner->getWindowFullscreen());
+}
+
+static RValue builtin_window_set_fullscreen(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("window_set_fullscreen", 1, RValue_makeUndefined());
+    Runner* runner = ctx->runner;
+    if (runner != nullptr && runner->setWindowFullscreen != nullptr) {
+        runner->setWindowFullscreen(RValue_toBool(args[0]));
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_window_get_x(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    int32_t x = 0, y = 0;
+    if (runner != nullptr && runner->getWindowPosition != nullptr && runner->getWindowPosition(&x, &y)) {
+        return RValue_makeReal((GMLReal)x);
+    }
+    return RValue_makeReal(0.0);
+}
+
+static RValue builtin_window_get_y(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    int32_t x = 0, y = 0;
+    if (runner != nullptr && runner->getWindowPosition != nullptr && runner->getWindowPosition(&x, &y)) {
+        return RValue_makeReal((GMLReal)y);
+    }
+    return RValue_makeReal(0.0);
+}
+
+static RValue builtin_window_set_position(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("window_set_position", 2, RValue_makeUndefined());
+    Runner* runner = ctx->runner;
+    if (runner != nullptr && runner->setWindowPosition != nullptr) {
+        runner->setWindowPosition(RValue_toInt32(args[0]), RValue_toInt32(args[1]));
+    }
+    return RValue_makeUndefined();
+}
+
 static RValue builtin_window_get_width(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = ctx->runner;
     if (runner != nullptr && runner->getWindowSize != nullptr) {
@@ -8724,7 +8762,11 @@ static RValue builtin_window_set_size(VMContext* ctx, RValue* args, MAYBE_UNUSED
 
     return RValue_makeUndefined();
 }
-STUB_RETURN_UNDEFINED(window_center)
+static RValue builtin_window_center(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    if (runner != nullptr && runner->centerWindow != nullptr) runner->centerWindow();
+    return RValue_makeUndefined();
+}
 
 static RValue builtin_window_set_caption(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     char* val = RValue_toString(args[0], ctx->runner->dataWin);
@@ -20932,8 +20974,6 @@ static bool vertexBufferGetWritablePtr(Buffer_Vertex* buffer, int32_t* outOffset
         return false;
     }
 
-    printf("[%s] Obtained writable pointer for vertex buffer at offset %d\n", functionName, *outOffset);
-
     *outPtr = buffer->buffer.pBuffer8 + *outOffset;
     return true;
 }
@@ -21036,15 +21076,6 @@ static RValue builtin_vertex_color(MAYBE_UNUSED VMContext* ctx, RValue* args, in
     } else {
         finalColor = (color & 0xffffffu) | ((uint32_t) alphaInt << 24);
     }
-
-        printf("[vertex_color] Writing color 0x%08X to vertex buffer %d at offset %d (bytes: %02X %02X %02X %02X)\n",
-            finalColor,
-            bufferIndex,
-            dataOffset,
-            (unsigned int) (finalColor & 0xFFu),
-            (unsigned int) ((finalColor >> 8) & 0xFFu),
-            (unsigned int) ((finalColor >> 16) & 0xFFu),
-            (unsigned int) ((finalColor >> 24) & 0xFFu));
 
     *(uint32_t*) (buffer->buffer.pBuffer8 + dataOffset) = finalColor;
     return RValue_makeUndefined();
@@ -22309,6 +22340,9 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     // Window
     VM_registerBuiltin(ctx, "window_get_fullscreen", builtin_window_get_fullscreen);
     VM_registerBuiltin(ctx, "window_set_fullscreen", builtin_window_set_fullscreen);
+    VM_registerBuiltin(ctx, "window_get_x", builtin_window_get_x);
+    VM_registerBuiltin(ctx, "window_get_y", builtin_window_get_y);
+    VM_registerBuiltin(ctx, "window_set_position", builtin_window_set_position);
     VM_registerBuiltin(ctx, "window_set_caption", builtin_window_set_caption);
     VM_registerBuiltin(ctx, "window_get_caption", builtin_window_get_caption);
     VM_registerBuiltin(ctx, "window_get_width", builtin_window_get_width);
